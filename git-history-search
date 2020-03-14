@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+
+#
+# git-history-search
+# Copyright (C) 2020 Kaushik Srenevasan
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+
+import concurrent.futures
+import pygit2
+import re
+import signal
+import sys
+
+
+class GitHistorySearch:
+    def __init__(self, path, pattern):
+        self._repository = pygit2.Repository(path)
+        self._trees_searched = {}
+        self._objects_searched = {}
+        self._commits_searched = {}
+        self._tags_searched = {}
+        self._blobs_searched = {}
+        self._work_list = []
+        self._pattern = re.compile(pattern.encode())
+
+    def _search_object(self, map, id, object):
+        if id in map:
+            return True
+
+        map[id] = True
+
+        if object == None:
+            object = self._lookup(id)
+
+            if object.type == pygit2.GIT_OBJ_BLOB:
+                match = self._pattern.search(object.data)
+                if match:
+                    print("{0} {1}".format(
+                        id, match.string[match.start():match.end()]))
+
+        return False
+
+    def _lookup(self, id):
+        result = self._repository.get(id)
+        if result == None:
+            print("WARNING: Unable to find {}".format(id))
+
+        return result
+
+    def _process_tree(self, root):
+        assert root.type == pygit2.GIT_OBJ_TREE
+
+        if self._search_object(self._trees_searched, root.id, root):
+            return
+
+        for node in root:
+            if node.type == "commit":
+                continue
+            elif node.type == "tree":
+                self._process_tree(self._lookup(node.id))
+            else:
+                if self._search_object(self._objects_searched, node.id, None):
+                    continue
+
+    def _process_commit(self, commit):
+        assert commit.type == pygit2.GIT_OBJ_COMMIT
+
+        if self._search_object(self._commits_searched, commit.id, commit):
+            return
+
+        self._process_tree(commit.tree)
+        for parent in commit.parents:
+            self._work_list.append(parent)
+
+    def _process_tag(self, tag):
+        assert tag.type == pygit2.GIT_OBJ_TAG
+
+        if self._search_object(self._tags_searched, tag.id, tag):
+            return
+
+        self._process_object(tag.get_object())
+
+    def _process_blob(self, blob):
+        assert blob.type == pygit2.GIT_OBJ_BLOB
+
+        if self._search_object(self._blobs_searched, blob.id, blob):
+            return
+
+    def _process_object(self, object):
+        if object.type == pygit2.GIT_OBJ_COMMIT:
+            self._process_commit(object)
+        elif object.type == pygit2.GIT_OBJ_TREE:
+            self._process_tree(object)
+        elif object.type == pygit2.GIT_OBJ_TAG:
+            self._process_tag(object)
+        else:
+            assert object.type == pygit2.GIT_OBJ_BLOB
+            self._process_blob(object)
+
+    def _ref_target(self, ref):
+        while ref.type == pygit2.GIT_REF_SYMBOLIC:
+            ref = ref.resolve()
+
+            assert ref.type == pygit2.GIT_REF_OID
+
+        return self._lookup(ref.target)
+
+    def _process_ref(self, ref):
+        object = self._ref_target(ref)
+
+        self._process_object(object)
+
+        while len(self._work_list) != 0:
+            self._process_commit(self._work_list.pop())
+
+    def search(self):
+        for r in self._repository.references:
+            self._process_ref(self._repository.references[r])
+
+
+def sigint_handler(signal, frame):
+    sys.exit(0)
+
+
+def main(argv):
+    if len(argv) != 3:
+        print("usage: git-history-search /path/to/git/repository regex")
+        return
+
+    signal.signal(signal.SIGINT, sigint_handler)
+
+    GitHistorySearch(argv[1], argv[2]).search()
+
+
+main(sys.argv)
