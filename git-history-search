@@ -114,7 +114,7 @@ class GitHistorySearch:
         while ref.type == pygit2.GIT_REF_SYMBOLIC:
             ref = ref.resolve()
 
-            assert ref.type == pygit2.GIT_REF_OID
+        assert ref.type == pygit2.GIT_REF_OID
 
         return self._lookup(ref.target)
 
